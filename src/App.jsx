@@ -27,25 +27,14 @@ import {
 } from "recharts";
 import { storage } from "./storage.js";
 import BarcodeScanner from "./BarcodeScanner.jsx";
+import CashFlow from "./CashFlow.jsx";
+import { TOKENS } from "./tokens.js";
 
-const TOKENS = {
-  bg: "#14181C",
-  panel: "#1B2126",
-  panelBorder: "#2A3339",
-  amber: "#F2A900",
-  amberDim: "#8A6A1F",
-  textPrimary: "#EDEDE5",
-  textSecondary: "#8B95A1",
-  good: "#4CAF7D",
-  warn: "#E0A62E",
-  bad: "#E2574C",
-};
-
-function statusColor(pct) {
+const statusColor = (pct) => {
   if (pct >= 98) return TOKENS.good;
   if (pct >= 90) return TOKENS.warn;
   return TOKENS.bad;
-}
+};
 
 function slugify(str) {
   return str
@@ -113,6 +102,7 @@ export default function AcuraStock() {
   const [loadingData, setLoadingData] = useState(false);
   const [saveError, setSaveError] = useState("");
   const [sortMode, setSortMode] = useState("worst"); // 'worst' | 'order'
+  const [activeTab, setActiveTab] = useState("estoque"); // 'estoque' | 'caixa'
 
   const [name, setName] = useState("");
   const [barcodeField, setBarcodeField] = useState("");
@@ -656,6 +646,35 @@ export default function AcuraStock() {
           </button>
         </div>
 
+        <div className="flex gap-2 mb-6 no-print">
+          <button
+            onClick={() => setActiveTab("estoque")}
+            className="px-4 py-2 rounded text-sm font-medium"
+            style={{
+              background: activeTab === "estoque" ? TOKENS.amber : TOKENS.panel,
+              color: activeTab === "estoque" ? "#1A1400" : TOKENS.textSecondary,
+              border: `1px solid ${activeTab === "estoque" ? TOKENS.amber : TOKENS.panelBorder}`,
+            }}
+          >
+            Estoque
+          </button>
+          <button
+            onClick={() => setActiveTab("caixa")}
+            className="px-4 py-2 rounded text-sm font-medium"
+            style={{
+              background: activeTab === "caixa" ? TOKENS.amber : TOKENS.panel,
+              color: activeTab === "caixa" ? "#1A1400" : TOKENS.textSecondary,
+              border: `1px solid ${activeTab === "caixa" ? TOKENS.amber : TOKENS.panelBorder}`,
+            }}
+          >
+            Caixa
+          </button>
+        </div>
+
+        {activeTab === "caixa" ? (
+          <CashFlow workspace={workspace} />
+        ) : (
+        <>
         <div
           className="rounded-lg p-6 mb-6 flex flex-col sm:flex-row items-center sm:items-end justify-between gap-6"
           style={{ background: TOKENS.panel, border: `1px solid ${TOKENS.panelBorder}` }}
@@ -955,6 +974,9 @@ export default function AcuraStock() {
               </LineChart>
             </ResponsiveContainer>
           </div>
+        )}
+
+        </>
         )}
 
       </div>

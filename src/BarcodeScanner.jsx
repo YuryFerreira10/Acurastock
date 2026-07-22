@@ -1,17 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { BrowserMultiFormatReader } from "@zxing/browser";
 import { X, ScanLine } from "lucide-react";
-
-const TOKENS = {
-  bg: "#14181C",
-  panel: "#1B2126",
-  panelBorder: "#2A3339",
-  amber: "#F2A900",
-  textPrimary: "#EDEDE5",
-  textSecondary: "#8B95A1",
-  good: "#4CAF7D",
-  bad: "#E2574C",
-};
+import { TOKENS } from "./tokens.js";
 
 export default function BarcodeScanner({ onDetected, feedback, onClose }) {
   const videoRef = useRef(null);
