@@ -4,6 +4,7 @@ import {
   Trash2,
   TriangleAlert,
   Download,
+  Upload,
   ArrowUpCircle,
   ArrowDownCircle,
   Wallet,
@@ -18,6 +19,7 @@ import {
   ResponsiveContainer,
   Cell,
 } from "recharts";
+import Papa from "papaparse";
 import { storage } from "./storage.js";
 import { TOKENS } from "./tokens.js";
 
@@ -80,6 +82,7 @@ export default function CashFlow({ workspace }) {
   const [monthFilter, setMonthFilter] = useState("todos");
 
   const workspaceRef = useRef(workspace);
+  const fileInputRef = useRef(null);
   workspaceRef.current = workspace;
 
   useEffect(() => {
@@ -189,6 +192,70 @@ export default function CashFlow({ workspace }) {
       .sort((a, b) => a.key.localeCompare(b.key))
       .map((m) => ({ ...m, label: monthLabel(m.key), resultado: m.entradas - m.saidas }));
   }, [transactions]);
+
+  function parseFlexibleDate(str) {
+    const s = (str || "").trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    const br = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+    if (br) return `${br[3]}-${br[2]}-${br[1]}`;
+    return todayISO();
+  }
+
+  function triggerImport() {
+    fileInputRef.current?.click();
+  }
+
+  function handleImportFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      const text = evt.target.result;
+      const parsed = Papa.parse(text.trim(), { skipEmptyLines: true });
+      let rowsIn = parsed.data;
+      if (rowsIn.length === 0) return;
+      const first = rowsIn[0];
+      const looksLikeHeader = isNaN(parseFloat(first[4]));
+      if (looksLikeHeader) rowsIn = rowsIn.slice(1);
+
+      const imported = rowsIn
+        .map((r) => {
+          const rDate = parseFlexibleDate(r[0]);
+          const description = (r[1] || "").toString().trim();
+          const category = (r[2] || "").toString().trim() || "Outros";
+          const typeRaw = (r[3] || "").toString().trim().toLowerCase();
+          const val = parseFloat((r[4] || "").toString().replace(",", "."));
+          const normType = typeRaw.startsWith("entr")
+            ? "entrada"
+            : typeRaw.startsWith("sa")
+            ? "saida"
+            : null;
+          if (!description || !normType || isNaN(val) || val <= 0) return null;
+          return {
+            id: Date.now() + Math.random(),
+            date: rDate,
+            description,
+            category,
+            type: normType,
+            value: val,
+          };
+        })
+        .filter(Boolean);
+
+      if (imported.length === 0) {
+        setSaveError(
+          'Não encontrei linhas válidas no CSV (esperado: data, descricao, categoria, tipo [entrada/saida], valor).'
+        );
+        return;
+      }
+      const next = [...transactions, ...imported];
+      setTransactions(next);
+      persist(next);
+      setSaveError("");
+    };
+    reader.readAsText(file, "UTF-8");
+    e.target.value = "";
+  }
 
   function exportCSV() {
     const header = ["Data", "Descricao", "Categoria", "Tipo", "Valor"];
@@ -333,7 +400,17 @@ export default function CashFlow({ workspace }) {
             <option key={m} value={m}>{monthLabel(m)}</option>
           ))}
         </select>
-        <button onClick={exportCSV} disabled={filtered.length === 0} className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded hover:opacity-80 disabled:opacity-40 ml-auto" style={toolbarBtnStyle()}>
+        <input
+          type="file"
+          accept=".csv"
+          ref={fileInputRef}
+          onChange={handleImportFile}
+          style={{ display: "none" }}
+        />
+        <button onClick={triggerImport} className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded hover:opacity-80 ml-auto" style={toolbarBtnStyle()}>
+          <Upload size={13} /> Importar CSV
+        </button>
+        <button onClick={exportCSV} disabled={filtered.length === 0} className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded hover:opacity-80 disabled:opacity-40" style={toolbarBtnStyle()}>
           <Download size={13} /> Exportar CSV
         </button>
       </div>
@@ -351,7 +428,7 @@ export default function CashFlow({ workspace }) {
       ) : (
         <div className="rounded-lg overflow-hidden mb-6" style={{ background: TOKENS.panel, border: `1px solid ${TOKENS.panelBorder}` }}>
           <div
-            className="grid grid-cols-[80px_1fr_120px_90px_36px] px-4 py-2 text-xs uppercase tracking-widest"
+            className="hidden sm:grid grid-cols-[80px_1fr_120px_90px_36px] px-4 py-2 text-xs uppercase tracking-widest"
             style={{ color: TOKENS.textSecondary, borderBottom: `1px solid ${TOKENS.panelBorder}` }}
           >
             <div>Data</div>
@@ -361,23 +438,42 @@ export default function CashFlow({ workspace }) {
             <div></div>
           </div>
           {sortedList.map((t) => (
-            <div
-              key={t.id}
-              className="grid grid-cols-[80px_1fr_120px_90px_36px] px-4 py-2.5 items-center text-sm"
-              style={{ borderBottom: `1px solid ${TOKENS.panelBorder}` }}
-            >
-              <div className="mono text-xs" style={{ color: TOKENS.textSecondary }}>
-                {t.date.split("-").reverse().join("/").slice(0, 5)}
+            <div key={t.id} style={{ borderBottom: `1px solid ${TOKENS.panelBorder}` }}>
+              {/* Cartão — telas pequenas */}
+              <div className="sm:hidden px-4 py-3">
+                <div className="flex items-start justify-between gap-2 mb-1">
+                  <span className="text-sm font-medium truncate pr-2" style={{ color: TOKENS.textPrimary }}>
+                    {t.description}
+                  </span>
+                  <button onClick={() => removeTransaction(t.id)} className="p-1 rounded hover:opacity-80 shrink-0" style={{ color: TOKENS.textSecondary }} aria-label="Remover lançamento">
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+                <div className="flex items-center justify-between text-xs">
+                  <span style={{ color: TOKENS.textSecondary }}>
+                    {t.date.split("-").reverse().join("/").slice(0, 5)} · {t.category}
+                  </span>
+                  <span className="mono text-sm font-medium" style={{ color: t.type === "entrada" ? TOKENS.good : TOKENS.bad }}>
+                    {t.type === "entrada" ? "+" : "-"}{formatMoney(t.value)}
+                  </span>
+                </div>
               </div>
-              <div className="truncate pr-2" style={{ color: TOKENS.textPrimary }}>{t.description}</div>
-              <div className="text-xs truncate" style={{ color: TOKENS.textSecondary }}>{t.category}</div>
-              <div className="mono text-right text-sm font-medium" style={{ color: t.type === "entrada" ? TOKENS.good : TOKENS.bad }}>
-                {t.type === "entrada" ? "+" : "-"}{formatMoney(t.value)}
-              </div>
-              <div className="flex justify-end">
-                <button onClick={() => removeTransaction(t.id)} className="p-1.5 rounded hover:opacity-80" style={{ color: TOKENS.textSecondary }} aria-label="Remover lançamento">
-                  <Trash2 size={14} />
-                </button>
+
+              {/* Linha de grade — telas médias e maiores */}
+              <div className="hidden sm:grid grid-cols-[80px_1fr_120px_90px_36px] px-4 py-2.5 items-center text-sm">
+                <div className="mono text-xs" style={{ color: TOKENS.textSecondary }}>
+                  {t.date.split("-").reverse().join("/").slice(0, 5)}
+                </div>
+                <div className="truncate pr-2" style={{ color: TOKENS.textPrimary }}>{t.description}</div>
+                <div className="text-xs truncate" style={{ color: TOKENS.textSecondary }}>{t.category}</div>
+                <div className="mono text-right text-sm font-medium" style={{ color: t.type === "entrada" ? TOKENS.good : TOKENS.bad }}>
+                  {t.type === "entrada" ? "+" : "-"}{formatMoney(t.value)}
+                </div>
+                <div className="flex justify-end">
+                  <button onClick={() => removeTransaction(t.id)} className="p-1.5 rounded hover:opacity-80" style={{ color: TOKENS.textSecondary }} aria-label="Remover lançamento">
+                    <Trash2 size={14} />
+                  </button>
+                </div>
               </div>
             </div>
           ))}
