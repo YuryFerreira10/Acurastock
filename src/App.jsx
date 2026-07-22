@@ -108,6 +108,7 @@ export default function AcuraStock() {
   const [barcodeField, setBarcodeField] = useState("");
   const [expected, setExpected] = useState("");
   const [counted, setCounted] = useState("");
+  const [unitCost, setUnitCost] = useState("");
 
   const [scannerOpen, setScannerOpen] = useState(false);
   const [scanFeedback, setScanFeedback] = useState(null);
@@ -238,10 +239,30 @@ export default function AcuraStock() {
     }
   }
 
+  async function pushCashflowEntry(entry) {
+    const ws = workspaceRef.current;
+    if (!ws) return;
+    try {
+      const key = `acurastock:cashflow:${ws.slug}`;
+      const res = await storage.get(key);
+      const current = res ? JSON.parse(res.value) : [];
+      const next = [
+        ...current,
+        { id: Date.now() + Math.random(), date: new Date().toISOString().slice(0, 10), ...entry },
+      ];
+      await storage.set(key, JSON.stringify(next));
+    } catch (e) {
+      // se falhar, o item ainda foi cadastrado normalmente — só o lançamento
+      // automático no caixa que não foi feito.
+    }
+  }
+
   function addItem() {
     const exp = parseFloat(expected);
     const cnt = parseFloat(counted);
     if (!name.trim() || isNaN(exp) || isNaN(cnt) || exp < 0 || cnt < 0) return;
+    const cost = parseFloat(unitCost.replace(",", "."));
+    const validCost = !isNaN(cost) && cost > 0 ? cost : 0;
     const next = [
       ...items,
       {
@@ -250,14 +271,26 @@ export default function AcuraStock() {
         expected: exp,
         counted: cnt,
         barcode: barcodeField.trim() || null,
+        unitCost: validCost,
       },
     ];
     setItems(next);
     persistItems(next);
+
+    if (validCost > 0 && exp > 0) {
+      pushCashflowEntry({
+        description: `Compra de estoque: ${name.trim()}`,
+        category: "Compra de estoque",
+        value: Number((validCost * exp).toFixed(2)),
+        type: "saida",
+      });
+    }
+
     setName("");
     setBarcodeField("");
     setExpected("");
     setCounted("");
+    setUnitCost("");
     setScanNotice("");
   }
 
@@ -348,6 +381,8 @@ export default function AcuraStock() {
           const exp = parseFloat(r[1]);
           const cnt = parseFloat(r[2]);
           const barcode = (r[3] || "").toString().trim() || null;
+          const cost = parseFloat((r[4] || "").toString().replace(",", "."));
+          const validCost = !isNaN(cost) && cost > 0 ? cost : 0;
           if (!itemName || isNaN(exp) || isNaN(cnt)) return null;
           return {
             id: Date.now() + Math.random(),
@@ -355,6 +390,7 @@ export default function AcuraStock() {
             expected: Math.max(0, exp),
             counted: Math.max(0, cnt),
             barcode,
+            unitCost: validCost,
           };
         })
         .filter(Boolean);
@@ -366,18 +402,28 @@ export default function AcuraStock() {
       setItems(next);
       persistItems(next);
       setSaveError("");
+
+      const totalPurchase = imported.reduce((s, it) => s + it.unitCost * it.expected, 0);
+      if (totalPurchase > 0) {
+        pushCashflowEntry({
+          description: `Importação de estoque (${imported.length} ${imported.length === 1 ? "item" : "itens"})`,
+          category: "Compra de estoque",
+          value: Number(totalPurchase.toFixed(2)),
+          type: "saida",
+        });
+      }
     };
     reader.readAsText(file, "UTF-8");
     e.target.value = "";
   }
 
   function exportCSV() {
-    const header = ["Item", "Sistema", "Contado", "Divergencia", "Acuracia(%)", "CodigoBarras"];
+    const header = ["Item", "Sistema", "Contado", "Divergencia", "Acuracia(%)", "CodigoBarras", "CustoUnitario"];
     const lines = [header.join(",")];
     rows.forEach((r) => {
       const safeName = r.name.includes(",") ? `"${r.name}"` : r.name;
       lines.push(
-        [safeName, r.expected, r.counted, r.diff, r.pct.toFixed(1), r.barcode || ""].join(",")
+        [safeName, r.expected, r.counted, r.diff, r.pct.toFixed(1), r.barcode || "", r.unitCost || ""].join(",")
       );
     });
     const csv = lines.join("\n");
@@ -534,6 +580,10 @@ export default function AcuraStock() {
   }, [rowsUnsorted]);
 
   const readoutColor = rows.length ? statusColor(totals.byQty) : TOKENS.amberDim;
+
+  const stockValue = useMemo(() => {
+    return items.reduce((s, it) => s + (it.unitCost || 0) * it.expected, 0);
+  }, [items]);
 
   const fontStyle = { fontFamily: "'IBM Plex Sans', ui-sans-serif, system-ui" };
   const fontLoader = (
@@ -731,6 +781,15 @@ export default function AcuraStock() {
           </div>
         </div>
 
+        {stockValue > 0 && (
+          <p className="text-xs mb-4 no-print" style={{ color: TOKENS.textSecondary }}>
+            Valor total do estoque (itens com custo cadastrado):{" "}
+            <span className="mono font-medium" style={{ color: TOKENS.textPrimary }}>
+              {stockValue.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}
+            </span>
+          </p>
+        )}
+
         {/* Toolbar */}
         <div className="no-print flex flex-wrap gap-2 mb-4">
           <input
@@ -774,7 +833,7 @@ export default function AcuraStock() {
         )}
 
         <div className="rounded-lg p-4 mb-2 no-print" style={{ background: TOKENS.panel, border: `1px solid ${TOKENS.panelBorder}` }}>
-          <div className="grid grid-cols-1 sm:grid-cols-[1fr_140px_140px_140px_auto] gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-[1fr_180px] gap-3 mb-3">
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
@@ -791,6 +850,8 @@ export default function AcuraStock() {
               className="mono px-3 py-2 rounded text-sm outline-none"
               style={inputStyle()}
             />
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-[140px_140px_160px_auto] gap-3">
             <input
               value={expected}
               onChange={(e) => setExpected(e.target.value)}
@@ -811,6 +872,14 @@ export default function AcuraStock() {
               className="mono px-3 py-2 rounded text-sm outline-none"
               style={inputStyle()}
             />
+            <input
+              value={unitCost}
+              onChange={(e) => setUnitCost(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Custo unit. (opcional)"
+              className="mono px-3 py-2 rounded text-sm outline-none"
+              style={inputStyle()}
+            />
             <button
               onClick={addItem}
               className="flex items-center justify-center gap-2 px-4 py-2 rounded text-sm font-medium transition-opacity hover:opacity-90"
@@ -819,6 +888,9 @@ export default function AcuraStock() {
               <Plus size={16} /> Adicionar
             </button>
           </div>
+          <p className="text-[11px] mt-2" style={{ color: TOKENS.textSecondary }}>
+            Se preencher o custo unitário, uma saída é lançada automaticamente na aba Caixa (categoria "Compra de estoque").
+          </p>
         </div>
 
         {saveError && (
