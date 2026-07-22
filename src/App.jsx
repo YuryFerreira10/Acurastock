@@ -95,7 +95,14 @@ function toolbarBtnStyle() {
 }
 
 export default function AcuraStock() {
-  const [workspace, setWorkspace] = useState(null); // { slug, name }
+  const [workspace, setWorkspace] = useState(() => {
+    try {
+      const saved = localStorage.getItem("acurastock:session");
+      return saved ? JSON.parse(saved) : null;
+    } catch (e) {
+      return null;
+    }
+  }); // { slug, name }
   const [company, setCompany] = useState("");
   const [code, setCode] = useState("");
   const [authError, setAuthError] = useState("");
@@ -163,6 +170,14 @@ export default function AcuraStock() {
       }
 
       setWorkspace({ slug, name: company.trim() });
+      try {
+        localStorage.setItem(
+          "acurastock:session",
+          JSON.stringify({ slug, name: company.trim() })
+        );
+      } catch (e) {
+        // se o navegador bloquear localStorage, a sessão simplesmente não persiste
+      }
       setAuthBusy(false);
     } catch (e) {
       setAuthError("Não foi possível conectar agora. Tente novamente.");
@@ -314,6 +329,11 @@ export default function AcuraStock() {
     setHistory([]);
     setCompany("");
     setCode("");
+    try {
+      localStorage.removeItem("acurastock:session");
+    } catch (e) {
+      // ignora se o navegador bloquear localStorage
+    }
   }
 
   function triggerImport() {
