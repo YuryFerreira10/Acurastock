@@ -13,6 +13,7 @@ import {
   ScanLine,
   Barcode,
   HelpCircle,
+  Search,
 } from "lucide-react";
 import Papa from "papaparse";
 import {
@@ -115,6 +116,9 @@ export default function AcuraStock() {
   const [scanFeedback, setScanFeedback] = useState(null);
   const [scanNotice, setScanNotice] = useState("");
   const [showHelp, setShowHelp] = useState(false);
+  const [search, setSearch] = useState("");
+  const [visibleCount, setVisibleCount] = useState(200);
+  const PAGE_SIZE = 200;
 
   const fileInputRef = useRef(null);
   const itemsRef = useRef(items);
@@ -490,6 +494,22 @@ export default function AcuraStock() {
     return rowsUnsorted;
   }, [rowsUnsorted, sortMode]);
 
+  const searchedRows = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter(
+      (r) => r.name.toLowerCase().includes(q) || (r.barcode || "").toLowerCase().includes(q)
+    );
+  }, [rows, search]);
+
+  const visibleRows = useMemo(() => {
+    return searchedRows.slice(0, visibleCount);
+  }, [searchedRows, visibleCount]);
+
+  useEffect(() => {
+    setVisibleCount(PAGE_SIZE);
+  }, [search, sortMode]);
+
   const totals = useMemo(() => {
     if (rowsUnsorted.length === 0) {
       return { byQty: 0, bySku: 0, totalAbsDiff: 0, skuOk: 0 };
@@ -780,84 +800,119 @@ export default function AcuraStock() {
           </div>
         ) : (
           <>
-            <div className="flex justify-end mb-2 no-print">
+            <div className="flex flex-wrap items-center gap-2 mb-2 no-print">
+              <div className="relative flex-1 min-w-[160px]">
+                <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2" style={{ color: TOKENS.textSecondary }} />
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Buscar por nome ou código de barras..."
+                  className="mono w-full pl-8 pr-3 py-1.5 rounded text-xs outline-none"
+                  style={inputStyle()}
+                />
+              </div>
               <button
                 onClick={() => setSortMode(sortMode === "worst" ? "order" : "worst")}
-                className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded hover:opacity-80"
+                className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded hover:opacity-80 whitespace-nowrap"
                 style={toolbarBtnStyle()}
               >
                 <ArrowUpDown size={12} />
-                {sortMode === "worst" ? "Ordenado: pior acurácia primeiro" : "Ordenado: ordem de cadastro"}
+                {sortMode === "worst" ? "Pior acurácia primeiro" : "Ordem de cadastro"}
               </button>
             </div>
 
-            <div className="rounded-lg overflow-hidden" style={{ background: TOKENS.panel, border: `1px solid ${TOKENS.panelBorder}` }}>
-              <div
-                className="grid grid-cols-[1fr_90px_90px_90px_90px_36px] px-4 py-2 text-xs uppercase tracking-widest"
-                style={{ color: TOKENS.textSecondary, borderBottom: `1px solid ${TOKENS.panelBorder}` }}
-              >
-                <div>Item</div>
-                <div className="text-right">Sistema</div>
-                <div className="text-right">Contado</div>
-                <div className="text-right">Diverg.</div>
-                <div className="text-right">Acurácia</div>
-                <div className="no-print"></div>
+            <p className="text-[11px] mb-2 no-print" style={{ color: TOKENS.textSecondary }}>
+              Mostrando {visibleRows.length} de {searchedRows.length}
+              {search ? ` (filtrado de ${rows.length} no total)` : ""}
+            </p>
+
+            {searchedRows.length === 0 ? (
+              <div className="rounded-lg p-8 text-center" style={{ background: TOKENS.panel, border: `1px dashed ${TOKENS.panelBorder}` }}>
+                <p className="text-sm" style={{ color: TOKENS.textSecondary }}>
+                  Nenhum item encontrado para "{search}".
+                </p>
               </div>
-              {rows.map((r) => (
+            ) : (
+              <div className="rounded-lg overflow-hidden" style={{ background: TOKENS.panel, border: `1px solid ${TOKENS.panelBorder}` }}>
                 <div
-                  key={r.id}
-                  className="grid grid-cols-[1fr_90px_90px_90px_90px_36px] px-4 py-2 items-center text-sm"
-                  style={{ borderBottom: `1px solid ${TOKENS.panelBorder}` }}
+                  className="grid grid-cols-[1fr_90px_90px_90px_90px_36px] px-4 py-2 text-xs uppercase tracking-widest"
+                  style={{ color: TOKENS.textSecondary, borderBottom: `1px solid ${TOKENS.panelBorder}` }}
                 >
-                  <div className="min-w-0">
-                    <input
-                      value={r.name}
-                      onChange={(e) => updateItemField(r.id, "name", e.target.value)}
-                      onBlur={handleFieldBlur}
-                      className="name-input mono print-text"
-                      style={{ color: TOKENS.textPrimary }}
-                    />
-                    {r.barcode && (
-                      <div className="flex items-center gap-1 mt-0.5" style={{ color: TOKENS.textSecondary }}>
-                        <Barcode size={10} />
-                        <span className="text-[10px] mono truncate">{r.barcode}</span>
-                      </div>
-                    )}
-                  </div>
-                  <input
-                    value={r.expected}
-                    onChange={(e) => updateItemField(r.id, "expected", e.target.value)}
-                    onBlur={handleFieldBlur}
-                    type="number"
-                    className="cell-input mono print-text"
-                    style={{ color: TOKENS.textSecondary }}
-                  />
-                  <input
-                    value={r.counted}
-                    onChange={(e) => updateItemField(r.id, "counted", e.target.value)}
-                    onBlur={handleFieldBlur}
-                    type="number"
-                    className="cell-input mono print-text"
-                    style={{ color: TOKENS.textSecondary }}
-                  />
-                  <div
-                    className="mono text-right flex items-center justify-end gap-1 print-text"
-                    style={{ color: r.diff === 0 ? TOKENS.textSecondary : TOKENS.bad }}
-                  >
-                    {r.diff !== 0 && <TriangleAlert size={12} />}
-                    {r.diff > 0 ? `+${r.diff}` : r.diff}
-                  </div>
-                  <div className="mono text-right font-medium print-text" style={{ color: statusColor(r.pct) }}>
-                    {r.pct.toFixed(0)}%
-                  </div>
-                  <div className="flex justify-end no-print">
-                    <button onClick={() => removeItem(r.id)} className="p-1.5 rounded hover:opacity-80" style={{ color: TOKENS.textSecondary }} aria-label={`Remover ${r.name}`}>
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
+                  <div>Item</div>
+                  <div className="text-right">Sistema</div>
+                  <div className="text-right">Contado</div>
+                  <div className="text-right">Diverg.</div>
+                  <div className="text-right">Acurácia</div>
+                  <div className="no-print"></div>
                 </div>
-              ))}
-            </div>
+                {visibleRows.map((r) => (
+                  <div
+                    key={r.id}
+                    className="grid grid-cols-[1fr_90px_90px_90px_90px_36px] px-4 py-2 items-center text-sm"
+                    style={{ borderBottom: `1px solid ${TOKENS.panelBorder}` }}
+                  >
+                    <div className="min-w-0">
+                      <input
+                        value={r.name}
+                        onChange={(e) => updateItemField(r.id, "name", e.target.value)}
+                        onBlur={handleFieldBlur}
+                        className="name-input mono print-text"
+                        style={{ color: TOKENS.textPrimary }}
+                      />
+                      {r.barcode && (
+                        <div className="flex items-center gap-1 mt-0.5" style={{ color: TOKENS.textSecondary }}>
+                          <Barcode size={10} />
+                          <span className="text-[10px] mono truncate">{r.barcode}</span>
+                        </div>
+                      )}
+                    </div>
+                    <input
+                      value={r.expected}
+                      onChange={(e) => updateItemField(r.id, "expected", e.target.value)}
+                      onBlur={handleFieldBlur}
+                      type="number"
+                      className="cell-input mono print-text"
+                      style={{ color: TOKENS.textSecondary }}
+                    />
+                    <input
+                      value={r.counted}
+                      onChange={(e) => updateItemField(r.id, "counted", e.target.value)}
+                      onBlur={handleFieldBlur}
+                      type="number"
+                      className="cell-input mono print-text"
+                      style={{ color: TOKENS.textSecondary }}
+                    />
+                    <div
+                      className="mono text-right flex items-center justify-end gap-1 print-text"
+                      style={{ color: r.diff === 0 ? TOKENS.textSecondary : TOKENS.bad }}
+                    >
+                      {r.diff !== 0 && <TriangleAlert size={12} />}
+                      {r.diff > 0 ? `+${r.diff}` : r.diff}
+                    </div>
+                    <div className="mono text-right font-medium print-text" style={{ color: statusColor(r.pct) }}>
+                      {r.pct.toFixed(0)}%
+                    </div>
+                    <div className="flex justify-end no-print">
+                      <button onClick={() => removeItem(r.id)} className="p-1.5 rounded hover:opacity-80" style={{ color: TOKENS.textSecondary }} aria-label={`Remover ${r.name}`}>
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {searchedRows.length > visibleRows.length && (
+              <div className="flex justify-center mt-3 no-print">
+                <button
+                  onClick={() => setVisibleCount((v) => v + PAGE_SIZE)}
+                  className="text-xs px-4 py-2 rounded hover:opacity-80"
+                  style={toolbarBtnStyle()}
+                >
+                  Carregar mais ({searchedRows.length - visibleRows.length} restantes)
+                </button>
+              </div>
+            )}
           </>
         )}
 
