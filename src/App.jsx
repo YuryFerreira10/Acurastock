@@ -12,6 +12,7 @@ import {
   ArrowUpDown,
   ScanLine,
   Barcode,
+  HelpCircle,
 } from "lucide-react";
 import Papa from "papaparse";
 import {
@@ -113,6 +114,7 @@ export default function AcuraStock() {
   const [scannerOpen, setScannerOpen] = useState(false);
   const [scanFeedback, setScanFeedback] = useState(null);
   const [scanNotice, setScanNotice] = useState("");
+  const [showHelp, setShowHelp] = useState(false);
 
   const fileInputRef = useRef(null);
   const itemsRef = useRef(items);
@@ -619,8 +621,31 @@ export default function AcuraStock() {
           style={{ background: TOKENS.panel, border: `1px solid ${TOKENS.panelBorder}` }}
         >
           <div>
-            <div className="text-xs uppercase tracking-widest mb-1" style={{ color: TOKENS.textSecondary }}>
-              Acurácia por quantidade
+            <div className="flex items-center gap-1.5 mb-1 relative">
+              <span className="text-xs uppercase tracking-widest" style={{ color: TOKENS.textSecondary }}>
+                Acurácia por quantidade
+              </span>
+              <button
+                onClick={() => setShowHelp((v) => !v)}
+                onBlur={() => setShowHelp(false)}
+                style={{ color: TOKENS.textSecondary }}
+                aria-label="O que significa acurácia por quantidade"
+              >
+                <HelpCircle size={13} />
+              </button>
+              {showHelp && (
+                <div
+                  className="absolute left-0 top-6 z-10 w-64 text-xs leading-relaxed p-3 rounded-lg no-print"
+                  style={{ background: TOKENS.bg, border: `1px solid ${TOKENS.panelBorder}`, color: TOKENS.textSecondary }}
+                >
+                  <p className="mb-1.5">
+                    <strong style={{ color: TOKENS.textPrimary }}>Por quantidade:</strong> 1 − (soma das divergências absolutas ÷ total esperado).
+                  </p>
+                  <p>
+                    <strong style={{ color: TOKENS.textPrimary }}>Por SKU:</strong> % de itens sem nenhuma divergência.
+                  </p>
+                </div>
+              )}
             </div>
             <div
               className="mono text-6xl font-semibold leading-none"
@@ -857,9 +882,6 @@ export default function AcuraStock() {
           </div>
         )}
 
-        <p className="text-xs mt-4 text-center no-print" style={{ color: TOKENS.textSecondary }}>
-          Acurácia por quantidade = 1 − (soma das divergências absolutas ÷ total esperado). Acurácia por SKU = % de itens sem divergência. Clique nos valores da tabela para editar.
-        </p>
       </div>
 
       {scannerOpen && (
