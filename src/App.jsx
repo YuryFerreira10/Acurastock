@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef } from "react";
+import React, { useState, useMemo, useEffect, useRef, useCallback } from "react";
 import {
   Plus,
   Trash2,
@@ -10,6 +10,8 @@ import {
   Download,
   Printer,
   ArrowUpDown,
+  ScanLine,
+  Barcode,
 } from "lucide-react";
 import Papa from "papaparse";
 import {
@@ -22,6 +24,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import { storage } from "./storage.js";
+import BarcodeScanner from "./BarcodeScanner.jsx";
 
 const TOKENS = {
   bg: "#14181C",
@@ -103,12 +106,20 @@ export default function AcuraStock() {
   const [sortMode, setSortMode] = useState("worst"); // 'worst' | 'order'
 
   const [name, setName] = useState("");
+  const [barcodeField, setBarcodeField] = useState("");
   const [expected, setExpected] = useState("");
   const [counted, setCounted] = useState("");
+
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [scanFeedback, setScanFeedback] = useState(null);
+  const [scanNotice, setScanNotice] = useState("");
 
   const fileInputRef = useRef(null);
   const itemsRef = useRef(items);
   itemsRef.current = items;
+  const workspaceRef = useRef(workspace);
+  workspaceRef.current = workspace;
+  const feedbackTimerRef = useRef(null);
 
   async function handleAuth() {
     setAuthError("");
@@ -190,11 +201,12 @@ export default function AcuraStock() {
   }, [workspace]);
 
   async function persistItems(nextItems) {
-    if (!workspace) return;
+    const ws = workspaceRef.current;
+    if (!ws) return;
     setSaveError("");
     try {
       const result = await storage.set(
-        `acurastock:data:${workspace.slug}`,
+        `acurastock:data:${ws.slug}`,
         JSON.stringify(nextItems)
       );
       if (!result) setSaveError("Não foi possível salvar. Tente novamente.");
@@ -221,13 +233,21 @@ export default function AcuraStock() {
     if (!name.trim() || isNaN(exp) || isNaN(cnt) || exp < 0 || cnt < 0) return;
     const next = [
       ...items,
-      { id: Date.now() + Math.random(), name: name.trim(), expected: exp, counted: cnt },
+      {
+        id: Date.now() + Math.random(),
+        name: name.trim(),
+        expected: exp,
+        counted: cnt,
+        barcode: barcodeField.trim() || null,
+      },
     ];
     setItems(next);
     persistItems(next);
     setName("");
+    setBarcodeField("");
     setExpected("");
     setCounted("");
+    setScanNotice("");
   }
 
   function removeItem(id) {
@@ -254,6 +274,29 @@ export default function AcuraStock() {
   function handleKeyDown(e) {
     if (e.key === "Enter") addItem();
   }
+
+  const handleScan = useCallback((code) => {
+    const current = itemsRef.current;
+    const idx = current.findIndex((it) => it.barcode && it.barcode === code);
+
+    if (idx >= 0) {
+      const next = current.map((it, i) =>
+        i === idx ? { ...it, counted: it.counted + 1 } : it
+      );
+      setItems(next);
+      persistItems(next);
+      setScanFeedback({
+        type: "ok",
+        text: `${current[idx].name}: contado agora ${next[idx].counted}`,
+      });
+      if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+      feedbackTimerRef.current = setTimeout(() => setScanFeedback(null), 1800);
+    } else {
+      setScannerOpen(false);
+      setBarcodeField(code);
+      setScanNotice(`Código ${code} não cadastrado — preencha o nome do item abaixo e adicione.`);
+    }
+  }, []);
 
   function handleAuthKeyDown(e) {
     if (e.key === "Enter") handleAuth();
@@ -288,12 +331,14 @@ export default function AcuraStock() {
           const itemName = (r[0] || "").toString().trim();
           const exp = parseFloat(r[1]);
           const cnt = parseFloat(r[2]);
+          const barcode = (r[3] || "").toString().trim() || null;
           if (!itemName || isNaN(exp) || isNaN(cnt)) return null;
           return {
             id: Date.now() + Math.random(),
             name: itemName,
             expected: Math.max(0, exp),
             counted: Math.max(0, cnt),
+            barcode,
           };
         })
         .filter(Boolean);
@@ -311,11 +356,13 @@ export default function AcuraStock() {
   }
 
   function exportCSV() {
-    const header = ["Item", "Sistema", "Contado", "Divergencia", "Acuracia(%)"];
+    const header = ["Item", "Sistema", "Contado", "Divergencia", "Acuracia(%)", "CodigoBarras"];
     const lines = [header.join(",")];
     rows.forEach((r) => {
       const safeName = r.name.includes(",") ? `"${r.name}"` : r.name;
-      lines.push([safeName, r.expected, r.counted, r.diff, r.pct.toFixed(1)].join(","));
+      lines.push(
+        [safeName, r.expected, r.counted, r.diff, r.pct.toFixed(1), r.barcode || ""].join(",")
+      );
     });
     const csv = lines.join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
@@ -612,6 +659,16 @@ export default function AcuraStock() {
           <button onClick={triggerImport} className="flex items-center gap-1.5 text-xs px-3 py-2 rounded hover:opacity-80" style={toolbarBtnStyle()}>
             <Upload size={13} /> Importar CSV
           </button>
+          <button
+            onClick={() => {
+              setScanFeedback(null);
+              setScannerOpen(true);
+            }}
+            className="flex items-center gap-1.5 text-xs px-3 py-2 rounded hover:opacity-80"
+            style={{ ...toolbarBtnStyle(), color: TOKENS.amber, borderColor: TOKENS.amberDim }}
+          >
+            <ScanLine size={13} /> Bipar item
+          </button>
           <button onClick={exportCSV} disabled={rows.length === 0} className="flex items-center gap-1.5 text-xs px-3 py-2 rounded hover:opacity-80 disabled:opacity-40" style={toolbarBtnStyle()}>
             <Download size={13} /> Exportar CSV
           </button>
@@ -623,13 +680,30 @@ export default function AcuraStock() {
           </button>
         </div>
 
+        {scanNotice && (
+          <p
+            className="text-xs mb-2 flex items-center gap-1.5 no-print px-3 py-2 rounded"
+            style={{ color: TOKENS.amber, background: TOKENS.panel, border: `1px solid ${TOKENS.amberDim}` }}
+          >
+            <Barcode size={12} /> {scanNotice}
+          </p>
+        )}
+
         <div className="rounded-lg p-4 mb-2 no-print" style={{ background: TOKENS.panel, border: `1px solid ${TOKENS.panelBorder}` }}>
-          <div className="grid grid-cols-1 sm:grid-cols-[1fr_140px_140px_auto] gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-[1fr_140px_140px_140px_auto] gap-3">
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="Nome do item / SKU"
+              className="mono px-3 py-2 rounded text-sm outline-none"
+              style={inputStyle()}
+            />
+            <input
+              value={barcodeField}
+              onChange={(e) => setBarcodeField(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Cód. de barras (opcional)"
               className="mono px-3 py-2 rounded text-sm outline-none"
               style={inputStyle()}
             />
@@ -710,13 +784,21 @@ export default function AcuraStock() {
                   className="grid grid-cols-[1fr_90px_90px_90px_90px_36px] px-4 py-2 items-center text-sm"
                   style={{ borderBottom: `1px solid ${TOKENS.panelBorder}` }}
                 >
-                  <input
-                    value={r.name}
-                    onChange={(e) => updateItemField(r.id, "name", e.target.value)}
-                    onBlur={handleFieldBlur}
-                    className="name-input mono print-text"
-                    style={{ color: TOKENS.textPrimary }}
-                  />
+                  <div className="min-w-0">
+                    <input
+                      value={r.name}
+                      onChange={(e) => updateItemField(r.id, "name", e.target.value)}
+                      onBlur={handleFieldBlur}
+                      className="name-input mono print-text"
+                      style={{ color: TOKENS.textPrimary }}
+                    />
+                    {r.barcode && (
+                      <div className="flex items-center gap-1 mt-0.5" style={{ color: TOKENS.textSecondary }}>
+                        <Barcode size={10} />
+                        <span className="text-[10px] mono truncate">{r.barcode}</span>
+                      </div>
+                    )}
+                  </div>
                   <input
                     value={r.expected}
                     onChange={(e) => updateItemField(r.id, "expected", e.target.value)}
@@ -779,6 +861,14 @@ export default function AcuraStock() {
           Acurácia por quantidade = 1 − (soma das divergências absolutas ÷ total esperado). Acurácia por SKU = % de itens sem divergência. Clique nos valores da tabela para editar.
         </p>
       </div>
+
+      {scannerOpen && (
+        <BarcodeScanner
+          onDetected={handleScan}
+          feedback={scanFeedback}
+          onClose={() => setScannerOpen(false)}
+        />
+      )}
     </div>
   );
 }
