@@ -14,6 +14,8 @@ import {
   Barcode,
   HelpCircle,
   Search,
+  Save,
+  RotateCcw,
 } from "lucide-react";
 import Papa from "papaparse";
 import {
@@ -27,7 +29,6 @@ import {
 } from "recharts";
 import { storage } from "./storage.js";
 import BarcodeScanner from "./BarcodeScanner.jsx";
-import CashFlow from "./CashFlow.jsx";
 import { TOKENS } from "./tokens.js";
 
 const statusColor = (pct) => {
@@ -43,6 +44,21 @@ function slugify(str) {
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/(^-|-$)/g, "");
+}
+
+function randomSaltHex(len = 16) {
+  const arr = crypto.getRandomValues(new Uint8Array(len));
+  return Array.from(arr)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function sha256Hex(text) {
+  const data = new TextEncoder().encode(text);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 function formatDate(ts) {
@@ -102,7 +118,6 @@ export default function AcuraStock() {
   const [loadingData, setLoadingData] = useState(false);
   const [saveError, setSaveError] = useState("");
   const [sortMode, setSortMode] = useState("worst"); // 'worst' | 'order'
-  const [activeTab, setActiveTab] = useState("estoque"); // 'estoque' | 'caixa'
 
   const [name, setName] = useState("");
   const [barcodeField, setBarcodeField] = useState("");
@@ -119,6 +134,7 @@ export default function AcuraStock() {
   const PAGE_SIZE = 200;
 
   const fileInputRef = useRef(null);
+  const backupInputRef = useRef(null);
   const itemsRef = useRef(items);
   itemsRef.current = items;
   const workspaceRef = useRef(workspace);
@@ -148,15 +164,43 @@ export default function AcuraStock() {
       }
 
       if (existing) {
-        if (existing.code !== code) {
-          setAuthError("Código de acesso incorreto para essa empresa.");
+        if (existing.hash && existing.salt) {
+          // formato novo: código verificado por hash, nunca fica em texto puro
+          const attemptHash = await sha256Hex(code + existing.salt);
+          if (attemptHash !== existing.hash) {
+            setAuthError("Código de acesso incorreto para essa empresa.");
+            setAuthBusy(false);
+            return;
+          }
+        } else if (typeof existing.code === "string") {
+          // formato antigo (texto puro) — valida e faz upgrade silencioso para hash
+          if (existing.code !== code) {
+            setAuthError("Código de acesso incorreto para essa empresa.");
+            setAuthBusy(false);
+            return;
+          }
+          const salt = randomSaltHex();
+          const hash = await sha256Hex(code + salt);
+          await storage.set(
+            `acurastock:auth:${slug}`,
+            JSON.stringify({
+              hash,
+              salt,
+              name: existing.name || company.trim(),
+              createdAt: existing.createdAt || Date.now(),
+            })
+          );
+        } else {
+          setAuthError("Não foi possível validar esse workspace.");
           setAuthBusy(false);
           return;
         }
       } else {
+        const salt = randomSaltHex();
+        const hash = await sha256Hex(code + salt);
         await storage.set(
           `acurastock:auth:${slug}`,
-          JSON.stringify({ code, name: company.trim(), createdAt: Date.now() })
+          JSON.stringify({ hash, salt, name: company.trim(), createdAt: Date.now() })
         );
       }
 
@@ -239,24 +283,6 @@ export default function AcuraStock() {
     }
   }
 
-  async function pushCashflowEntry(entry) {
-    const ws = workspaceRef.current;
-    if (!ws) return;
-    try {
-      const key = `acurastock:cashflow:${ws.slug}`;
-      const res = await storage.get(key);
-      const current = res ? JSON.parse(res.value) : [];
-      const next = [
-        ...current,
-        { id: Date.now() + Math.random(), date: new Date().toISOString().slice(0, 10), ...entry },
-      ];
-      await storage.set(key, JSON.stringify(next));
-    } catch (e) {
-      // se falhar, o item ainda foi cadastrado normalmente — só o lançamento
-      // automático no caixa que não foi feito.
-    }
-  }
-
   function addItem() {
     const exp = parseFloat(expected);
     const cnt = parseFloat(counted);
@@ -276,15 +302,6 @@ export default function AcuraStock() {
     ];
     setItems(next);
     persistItems(next);
-
-    if (validCost > 0 && exp > 0) {
-      pushCashflowEntry({
-        description: `Compra de estoque: ${name.trim()}`,
-        category: "Compra de estoque",
-        value: Number((validCost * exp).toFixed(2)),
-        type: "saida",
-      });
-    }
 
     setName("");
     setBarcodeField("");
@@ -402,16 +419,6 @@ export default function AcuraStock() {
       setItems(next);
       persistItems(next);
       setSaveError("");
-
-      const totalPurchase = imported.reduce((s, it) => s + it.unitCost * it.expected, 0);
-      if (totalPurchase > 0) {
-        pushCashflowEntry({
-          description: `Importação de estoque (${imported.length} ${imported.length === 1 ? "item" : "itens"})`,
-          category: "Compra de estoque",
-          value: Number(totalPurchase.toFixed(2)),
-          type: "saida",
-        });
-      }
     };
     reader.readAsText(file, "UTF-8");
     e.target.value = "";
@@ -515,6 +522,61 @@ export default function AcuraStock() {
     a.download = `acurastock-relatorio-${workspace.slug}-${new Date().toISOString().slice(0, 10)}.html`;
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  function exportBackup() {
+    const backup = {
+      app: "acurastock",
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      workspace: { slug: workspace.slug, name: workspace.name },
+      items,
+      history,
+    };
+    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `acurastock-backup-${workspace.slug}-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function triggerRestoreBackup() {
+    backupInputRef.current?.click();
+  }
+
+  function handleRestoreBackup(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const data = JSON.parse(evt.target.result);
+        if (!Array.isArray(data.items)) {
+          setSaveError("Arquivo de backup inválido: não encontrei a lista de itens.");
+          return;
+        }
+        const confirmed = window.confirm(
+          `Isso vai SUBSTITUIR todos os itens e o histórico atuais deste workspace pelos dados do backup (de ${
+            data.exportedAt ? new Date(data.exportedAt).toLocaleString("pt-BR") : "data desconhecida"
+          }). Essa ação não pode ser desfeita. Continuar?`
+        );
+        if (!confirmed) return;
+
+        const restoredItems = data.items;
+        const restoredHistory = Array.isArray(data.history) ? data.history : [];
+        setItems(restoredItems);
+        setHistory(restoredHistory);
+        persistItems(restoredItems);
+        persistHistory(restoredHistory);
+        setSaveError("");
+      } catch (err) {
+        setSaveError("Não foi possível ler esse arquivo de backup (JSON inválido).");
+      }
+    };
+    reader.readAsText(file, "UTF-8");
+    e.target.value = "";
   }
 
   function closeCount() {
@@ -663,7 +725,7 @@ export default function AcuraStock() {
           </div>
 
           <p className="text-[11px] mt-4 text-center leading-relaxed" style={{ color: TOKENS.textSecondary }}>
-            Versão demo: os dados ficam isolados por empresa, mas o código de acesso não usa criptografia de produção. Não use senhas reais aqui.
+            O código de acesso é verificado por hash (nunca fica salvo em texto puro), mas essa verificação ainda acontece só no navegador — não é o mesmo nível de segurança de um sistema com backend próprio. Evite reutilizar senhas importantes aqui.
           </p>
         </div>
       </div>
@@ -696,35 +758,6 @@ export default function AcuraStock() {
           </button>
         </div>
 
-        <div className="flex gap-2 mb-6 no-print">
-          <button
-            onClick={() => setActiveTab("estoque")}
-            className="px-4 py-2 rounded text-sm font-medium"
-            style={{
-              background: activeTab === "estoque" ? TOKENS.amber : TOKENS.panel,
-              color: activeTab === "estoque" ? "#1A1400" : TOKENS.textSecondary,
-              border: `1px solid ${activeTab === "estoque" ? TOKENS.amber : TOKENS.panelBorder}`,
-            }}
-          >
-            Estoque
-          </button>
-          <button
-            onClick={() => setActiveTab("caixa")}
-            className="px-4 py-2 rounded text-sm font-medium"
-            style={{
-              background: activeTab === "caixa" ? TOKENS.amber : TOKENS.panel,
-              color: activeTab === "caixa" ? "#1A1400" : TOKENS.textSecondary,
-              border: `1px solid ${activeTab === "caixa" ? TOKENS.amber : TOKENS.panelBorder}`,
-            }}
-          >
-            Caixa
-          </button>
-        </div>
-
-        {activeTab === "caixa" ? (
-          <CashFlow workspace={workspace} />
-        ) : (
-        <>
         <div
           className="rounded-lg p-6 mb-6 flex flex-col sm:flex-row items-center sm:items-end justify-between gap-6"
           style={{ background: TOKENS.panel, border: `1px solid ${TOKENS.panelBorder}` }}
@@ -823,6 +856,25 @@ export default function AcuraStock() {
           </button>
         </div>
 
+        <div className="no-print flex flex-wrap items-center gap-2 mb-4">
+          <span className="text-[11px] uppercase tracking-widest" style={{ color: TOKENS.textSecondary }}>
+            Backup:
+          </span>
+          <input
+            type="file"
+            accept=".json"
+            ref={backupInputRef}
+            onChange={handleRestoreBackup}
+            style={{ display: "none" }}
+          />
+          <button onClick={exportBackup} className="flex items-center gap-1.5 text-xs px-3 py-2 rounded hover:opacity-80" style={toolbarBtnStyle()}>
+            <Save size={13} /> Exportar backup completo
+          </button>
+          <button onClick={triggerRestoreBackup} className="flex items-center gap-1.5 text-xs px-3 py-2 rounded hover:opacity-80" style={toolbarBtnStyle()}>
+            <RotateCcw size={13} /> Restaurar backup
+          </button>
+        </div>
+
         {scanNotice && (
           <p
             className="text-xs mb-2 flex items-center gap-1.5 no-print px-3 py-2 rounded"
@@ -889,7 +941,7 @@ export default function AcuraStock() {
             </button>
           </div>
           <p className="text-[11px] mt-2" style={{ color: TOKENS.textSecondary }}>
-            Se preencher o custo unitário, uma saída é lançada automaticamente na aba Caixa (categoria "Compra de estoque").
+            O custo unitário (opcional) é usado só para calcular o valor total do estoque, mostrado acima da tabela.
           </p>
         </div>
 
@@ -1104,9 +1156,6 @@ export default function AcuraStock() {
               </LineChart>
             </ResponsiveContainer>
           </div>
-        )}
-
-        </>
         )}
 
       </div>
