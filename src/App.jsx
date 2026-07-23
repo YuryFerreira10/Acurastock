@@ -101,7 +101,7 @@ export default function AcuraStock() {
   const [sessionLoading, setSessionLoading] = useState(true);
 
   const [authMode, setAuthMode] = useState("login"); // 'login' | 'signup' | 'forgot'
-  const [companyName, setCompanyName] = useState("");
+  const [signupCompany, setSignupCompany] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [authError, setAuthError] = useState("");
@@ -171,7 +171,7 @@ export default function AcuraStock() {
   async function handleSignup() {
     setAuthError("");
     setAuthMessage("");
-    if (!companyName.trim() || !email.trim() || !password) {
+    if (!signupCompany.trim() || !email.trim() || !password) {
       setAuthError("Preencha empresa, e-mail e senha.");
       return;
     }
@@ -183,7 +183,7 @@ export default function AcuraStock() {
     const { data, error } = await supabase.auth.signUp({
       email: email.trim(),
       password,
-      options: { data: { company_name: companyName.trim() } },
+      options: { data: { company_name: signupCompany.trim() } },
     });
     if (error) {
       setAuthError(translateAuthError(error));
@@ -657,8 +657,8 @@ export default function AcuraStock() {
                   <Building2 size={12} /> Nome da empresa
                 </label>
                 <input
-                  value={companyName}
-                  onChange={(e) => setCompanyName(e.target.value)}
+                  value={signupCompany}
+                  onChange={(e) => setSignupCompany(e.target.value)}
                   onKeyDown={handleAuthKeyDown}
                   placeholder="Ex: Distribuidora Aurora"
                   className="mono w-full px-3 py-2 rounded text-sm outline-none mb-4"
