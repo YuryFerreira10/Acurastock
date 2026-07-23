@@ -16,6 +16,9 @@ import {
   Search,
   Save,
   RotateCcw,
+  Sun,
+  Moon,
+  MoreVertical,
 } from "lucide-react";
 import Papa from "papaparse";
 import {
@@ -30,13 +33,7 @@ import {
 import { supabase } from "./supabaseClient.js";
 import { loadAppData, saveAppData } from "./supabaseData.js";
 import BarcodeScanner from "./BarcodeScanner.jsx";
-import { TOKENS } from "./tokens.js";
-
-const statusColor = (pct) => {
-  if (pct >= 98) return TOKENS.good;
-  if (pct >= 90) return TOKENS.warn;
-  return TOKENS.bad;
-};
+import { DARK_TOKENS, LIGHT_TOKENS } from "./tokens.js";
 
 function translateAuthError(error) {
   const msg = error?.message || "";
@@ -80,23 +77,46 @@ function Logo({ size = 40 }) {
   );
 }
 
-function inputStyle() {
-  return {
-    background: TOKENS.bg,
-    border: `1px solid ${TOKENS.panelBorder}`,
-    color: TOKENS.textPrimary,
-  };
-}
-
-function toolbarBtnStyle() {
-  return {
-    color: TOKENS.textSecondary,
-    border: `1px solid ${TOKENS.panelBorder}`,
-    background: TOKENS.bg,
-  };
-}
-
 export default function AcuraStock() {
+  const [theme, setTheme] = useState(() => {
+    try {
+      return localStorage.getItem("acurastock:theme") || "dark";
+    } catch (e) {
+      return "dark";
+    }
+  });
+  const TOKENS = theme === "light" ? LIGHT_TOKENS : DARK_TOKENS;
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("acurastock:theme", theme);
+    } catch (e) {
+      // se o navegador bloquear localStorage, só não persiste a preferência
+    }
+  }, [theme]);
+
+  function statusColor(pct) {
+    if (pct >= 98) return TOKENS.good;
+    if (pct >= 90) return TOKENS.warn;
+    return TOKENS.bad;
+  }
+
+  function inputStyle() {
+    return {
+      background: TOKENS.bg,
+      border: `1px solid ${TOKENS.panelBorder}`,
+      color: TOKENS.textPrimary,
+    };
+  }
+
+  function toolbarBtnStyle() {
+    return {
+      color: TOKENS.textSecondary,
+      border: `1px solid ${TOKENS.panelBorder}`,
+      background: TOKENS.bg,
+    };
+  }
+
   const [session, setSession] = useState(null);
   const [sessionLoading, setSessionLoading] = useState(true);
 
@@ -123,6 +143,7 @@ export default function AcuraStock() {
   const [scannerOpen, setScannerOpen] = useState(false);
   const [scanFeedback, setScanFeedback] = useState(null);
   const [scanNotice, setScanNotice] = useState("");
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [search, setSearch] = useState("");
   const [visibleCount, setVisibleCount] = useState(200);
@@ -781,13 +802,24 @@ export default function AcuraStock() {
               </p>
             </div>
           </div>
-          <button
-            onClick={logout}
-            className="no-print flex items-center gap-1.5 text-xs px-3 py-1.5 rounded hover:opacity-80"
-            style={{ color: TOKENS.textSecondary, border: `1px solid ${TOKENS.panelBorder}` }}
-          >
-            <LogOut size={13} /> Sair
-          </button>
+          <div className="flex items-center gap-2 no-print">
+            <button
+              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+              className="flex items-center justify-center w-8 h-8 rounded hover:opacity-80"
+              style={{ color: TOKENS.textSecondary, border: `1px solid ${TOKENS.panelBorder}` }}
+              aria-label="Alternar tema claro/escuro"
+              title={theme === "dark" ? "Mudar para modo claro" : "Mudar para modo escuro"}
+            >
+              {theme === "dark" ? <Sun size={14} /> : <Moon size={14} />}
+            </button>
+            <button
+              onClick={logout}
+              className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded hover:opacity-80"
+              style={{ color: TOKENS.textSecondary, border: `1px solid ${TOKENS.panelBorder}` }}
+            >
+              <LogOut size={13} /> Sair
+            </button>
+          </div>
         </div>
 
         <div
@@ -856,12 +888,19 @@ export default function AcuraStock() {
         )}
 
         {/* Toolbar */}
-        <div className="no-print flex flex-wrap gap-2 mb-4">
+        <div className="no-print flex flex-wrap items-center gap-2 mb-4">
           <input
             type="file"
             accept=".csv"
             ref={fileInputRef}
             onChange={handleImportFile}
+            style={{ display: "none" }}
+          />
+          <input
+            type="file"
+            accept=".json"
+            ref={backupInputRef}
+            onChange={handleRestoreBackup}
             style={{ display: "none" }}
           />
           <button onClick={triggerImport} className="flex items-center gap-1.5 text-xs px-3 py-2 rounded hover:opacity-80" style={toolbarBtnStyle()}>
@@ -877,34 +916,84 @@ export default function AcuraStock() {
           >
             <ScanLine size={13} /> Bipar item
           </button>
-          <button onClick={exportCSV} disabled={rows.length === 0} className="flex items-center gap-1.5 text-xs px-3 py-2 rounded hover:opacity-80 disabled:opacity-40" style={toolbarBtnStyle()}>
-            <Download size={13} /> Exportar CSV
-          </button>
-          <button onClick={exportPDF} disabled={rows.length === 0} className="flex items-center gap-1.5 text-xs px-3 py-2 rounded hover:opacity-80 disabled:opacity-40" style={toolbarBtnStyle()} title="Baixa um HTML pronto para imprimir/salvar como PDF">
-            <Printer size={13} /> Relatório p/ PDF
-          </button>
-          <button onClick={closeCount} disabled={rows.length === 0} className="flex items-center gap-1.5 text-xs px-3 py-2 rounded hover:opacity-80 disabled:opacity-40 ml-auto" style={{ ...toolbarBtnStyle(), color: TOKENS.amber, borderColor: TOKENS.amberDim }}>
-            Fechar contagem no histórico
-          </button>
-        </div>
 
-        <div className="no-print flex flex-wrap items-center gap-2 mb-4">
-          <span className="text-[11px] uppercase tracking-widest" style={{ color: TOKENS.textSecondary }}>
-            Backup:
-          </span>
-          <input
-            type="file"
-            accept=".json"
-            ref={backupInputRef}
-            onChange={handleRestoreBackup}
-            style={{ display: "none" }}
-          />
-          <button onClick={exportBackup} className="flex items-center gap-1.5 text-xs px-3 py-2 rounded hover:opacity-80" style={toolbarBtnStyle()}>
-            <Save size={13} /> Exportar backup completo
-          </button>
-          <button onClick={triggerRestoreBackup} className="flex items-center gap-1.5 text-xs px-3 py-2 rounded hover:opacity-80" style={toolbarBtnStyle()}>
-            <RotateCcw size={13} /> Restaurar backup
-          </button>
+          <div className="relative ml-auto">
+            <button
+              onClick={() => setMoreMenuOpen((v) => !v)}
+              className="flex items-center justify-center w-8 h-8 rounded hover:opacity-80"
+              style={toolbarBtnStyle()}
+              aria-label="Mais opções"
+            >
+              <MoreVertical size={15} />
+            </button>
+            {moreMenuOpen && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setMoreMenuOpen(false)} />
+                <div
+                  className="absolute right-0 top-10 z-50 w-60 rounded-lg p-1.5"
+                  style={{ background: TOKENS.panel, border: `1px solid ${TOKENS.panelBorder}` }}
+                >
+                  {rows.length > 0 && (
+                    <>
+                      <button
+                        onClick={() => {
+                          exportCSV();
+                          setMoreMenuOpen(false);
+                        }}
+                        className="w-full flex items-center gap-2 text-xs px-2.5 py-2 rounded hover:opacity-80 text-left"
+                        style={{ color: TOKENS.textPrimary }}
+                      >
+                        <Download size={13} /> Exportar CSV
+                      </button>
+                      <button
+                        onClick={() => {
+                          exportPDF();
+                          setMoreMenuOpen(false);
+                        }}
+                        className="w-full flex items-center gap-2 text-xs px-2.5 py-2 rounded hover:opacity-80 text-left"
+                        style={{ color: TOKENS.textPrimary }}
+                        title="Baixa um HTML pronto para imprimir/salvar como PDF"
+                      >
+                        <Printer size={13} /> Relatório p/ PDF
+                      </button>
+                      <button
+                        onClick={() => {
+                          closeCount();
+                          setMoreMenuOpen(false);
+                        }}
+                        className="w-full flex items-center gap-2 text-xs px-2.5 py-2 rounded hover:opacity-80 text-left"
+                        style={{ color: TOKENS.amber }}
+                      >
+                        Fechar contagem no histórico
+                      </button>
+                      <div className="my-1 border-t" style={{ borderColor: TOKENS.panelBorder }} />
+                    </>
+                  )}
+                  <button
+                    onClick={() => {
+                      exportBackup();
+                      setMoreMenuOpen(false);
+                    }}
+                    disabled={rows.length === 0}
+                    className="w-full flex items-center gap-2 text-xs px-2.5 py-2 rounded hover:opacity-80 disabled:opacity-40 text-left"
+                    style={{ color: TOKENS.textPrimary }}
+                  >
+                    <Save size={13} /> Exportar backup completo
+                  </button>
+                  <button
+                    onClick={() => {
+                      triggerRestoreBackup();
+                      setMoreMenuOpen(false);
+                    }}
+                    className="w-full flex items-center gap-2 text-xs px-2.5 py-2 rounded hover:opacity-80 text-left"
+                    style={{ color: TOKENS.textPrimary }}
+                  >
+                    <RotateCcw size={13} /> Restaurar backup
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
 
         {scanNotice && (
@@ -988,10 +1077,45 @@ export default function AcuraStock() {
             <p className="text-sm" style={{ color: TOKENS.textSecondary }}>Carregando seus dados...</p>
           </div>
         ) : rows.length === 0 ? (
-          <div className="rounded-lg p-10 text-center mt-4" style={{ background: TOKENS.panel, border: `1px dashed ${TOKENS.panelBorder}` }}>
-            <p className="text-sm" style={{ color: TOKENS.textSecondary }}>
-              Nenhum item lançado ainda. Adicione um item acima ou importe um CSV para começar.
+          <div className="rounded-lg p-8 mt-4" style={{ background: TOKENS.panel, border: `1px dashed ${TOKENS.panelBorder}` }}>
+            <p className="text-sm text-center mb-6" style={{ color: TOKENS.textPrimary }}>
+              Ainda não há itens neste workspace. Veja como começar:
             </p>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div className="flex flex-col items-center text-center gap-2">
+                <div
+                  className="flex items-center justify-center w-9 h-9 rounded-full mono font-semibold"
+                  style={{ background: TOKENS.bg, color: TOKENS.amber, border: `1px solid ${TOKENS.amberDim}` }}
+                >
+                  1
+                </div>
+                <p className="text-xs" style={{ color: TOKENS.textSecondary }}>
+                  Adicione um item no formulário acima ou importe uma planilha CSV
+                </p>
+              </div>
+              <div className="flex flex-col items-center text-center gap-2">
+                <div
+                  className="flex items-center justify-center w-9 h-9 rounded-full mono font-semibold"
+                  style={{ background: TOKENS.bg, color: TOKENS.amber, border: `1px solid ${TOKENS.amberDim}` }}
+                >
+                  2
+                </div>
+                <p className="text-xs" style={{ color: TOKENS.textSecondary }}>
+                  Compare sistema x contagem física, ajustando direto na tabela
+                </p>
+              </div>
+              <div className="flex flex-col items-center text-center gap-2">
+                <div
+                  className="flex items-center justify-center w-9 h-9 rounded-full mono font-semibold"
+                  style={{ background: TOKENS.bg, color: TOKENS.amber, border: `1px solid ${TOKENS.amberDim}` }}
+                >
+                  3
+                </div>
+                <p className="text-xs" style={{ color: TOKENS.textSecondary }}>
+                  Exporte o relatório ou feche a contagem no histórico
+                </p>
+              </div>
+            </div>
           </div>
         ) : (
           <>
