@@ -27,7 +27,8 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
-import { storage } from "./storage.js";
+import { supabase } from "./supabaseClient.js";
+import { loadAppData, saveAppData } from "./supabaseData.js";
 import BarcodeScanner from "./BarcodeScanner.jsx";
 import { TOKENS } from "./tokens.js";
 
@@ -37,28 +38,24 @@ const statusColor = (pct) => {
   return TOKENS.bad;
 };
 
-function slugify(str) {
-  return str
+function translateAuthError(error) {
+  const msg = error?.message || "";
+  if (msg.includes("Invalid login credentials")) return "E-mail ou senha incorretos.";
+  if (msg.includes("User already registered")) return "Já existe uma conta com esse e-mail.";
+  if (msg.includes("Password should be at least")) return "A senha precisa ter pelo menos 6 caracteres.";
+  if (msg.includes("Email not confirmed"))
+    return "Confirme seu e-mail antes de entrar (verifique sua caixa de entrada e o spam).";
+  if (msg.includes("rate limit")) return "Muitas tentativas em pouco tempo. Aguarde um pouco e tente de novo.";
+  return msg || "Não foi possível completar a ação. Tente novamente.";
+}
+
+function slugifyName(str) {
+  return (str || "workspace")
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/[^a-z0-9]+/g, "-")
-    .replace(/(^-|-$)/g, "");
-}
-
-function randomSaltHex(len = 16) {
-  const arr = crypto.getRandomValues(new Uint8Array(len));
-  return Array.from(arr)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-async function sha256Hex(text) {
-  const data = new TextEncoder().encode(text);
-  const digest = await crypto.subtle.digest("SHA-256", data);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+    .replace(/(^-|-$)/g, "") || "workspace";
 }
 
 function formatDate(ts) {
@@ -100,17 +97,15 @@ function toolbarBtnStyle() {
 }
 
 export default function AcuraStock() {
-  const [workspace, setWorkspace] = useState(() => {
-    try {
-      const saved = localStorage.getItem("acurastock:session");
-      return saved ? JSON.parse(saved) : null;
-    } catch (e) {
-      return null;
-    }
-  }); // { slug, name }
-  const [company, setCompany] = useState("");
-  const [code, setCode] = useState("");
+  const [session, setSession] = useState(null);
+  const [sessionLoading, setSessionLoading] = useState(true);
+
+  const [authMode, setAuthMode] = useState("login"); // 'login' | 'signup' | 'forgot'
+  const [companyName, setCompanyName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [authError, setAuthError] = useState("");
+  const [authMessage, setAuthMessage] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
 
   const [items, setItems] = useState([]);
@@ -137,115 +132,111 @@ export default function AcuraStock() {
   const backupInputRef = useRef(null);
   const itemsRef = useRef(items);
   itemsRef.current = items;
-  const workspaceRef = useRef(workspace);
-  workspaceRef.current = workspace;
+  const historyRef = useRef(history);
+  historyRef.current = history;
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
   const feedbackTimerRef = useRef(null);
 
-  async function handleAuth() {
+  const companyName = session?.user?.user_metadata?.company_name || session?.user?.email || "";
+  const fileSlug = slugifyName(companyName);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setSessionLoading(false);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+    });
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  async function handleLogin() {
     setAuthError("");
-    if (!company.trim() || !code.trim()) {
-      setAuthError("Preencha empresa e código de acesso.");
+    setAuthMessage("");
+    if (!email.trim() || !password) {
+      setAuthError("Preencha e-mail e senha.");
       return;
     }
     setAuthBusy(true);
-    const slug = slugify(company);
-    if (!slug) {
-      setAuthError("Nome de empresa inválido.");
-      setAuthBusy(false);
+    const { error } = await supabase.auth.signInWithPassword({
+      email: email.trim(),
+      password,
+    });
+    if (error) setAuthError(translateAuthError(error));
+    setAuthBusy(false);
+  }
+
+  async function handleSignup() {
+    setAuthError("");
+    setAuthMessage("");
+    if (!companyName.trim() || !email.trim() || !password) {
+      setAuthError("Preencha empresa, e-mail e senha.");
       return;
     }
-    try {
-      let existing = null;
-      try {
-        const res = await storage.get(`acurastock:auth:${slug}`);
-        existing = res ? JSON.parse(res.value) : null;
-      } catch (e) {
-        existing = null;
-      }
-
-      if (existing) {
-        if (existing.hash && existing.salt) {
-          // formato novo: código verificado por hash, nunca fica em texto puro
-          const attemptHash = await sha256Hex(code + existing.salt);
-          if (attemptHash !== existing.hash) {
-            setAuthError("Código de acesso incorreto para essa empresa.");
-            setAuthBusy(false);
-            return;
-          }
-        } else if (typeof existing.code === "string") {
-          // formato antigo (texto puro) — valida e faz upgrade silencioso para hash
-          if (existing.code !== code) {
-            setAuthError("Código de acesso incorreto para essa empresa.");
-            setAuthBusy(false);
-            return;
-          }
-          const salt = randomSaltHex();
-          const hash = await sha256Hex(code + salt);
-          await storage.set(
-            `acurastock:auth:${slug}`,
-            JSON.stringify({
-              hash,
-              salt,
-              name: existing.name || company.trim(),
-              createdAt: existing.createdAt || Date.now(),
-            })
-          );
-        } else {
-          setAuthError("Não foi possível validar esse workspace.");
-          setAuthBusy(false);
-          return;
-        }
-      } else {
-        const salt = randomSaltHex();
-        const hash = await sha256Hex(code + salt);
-        await storage.set(
-          `acurastock:auth:${slug}`,
-          JSON.stringify({ hash, salt, name: company.trim(), createdAt: Date.now() })
-        );
-      }
-
-      setWorkspace({ slug, name: company.trim() });
-      try {
-        localStorage.setItem(
-          "acurastock:session",
-          JSON.stringify({ slug, name: company.trim() })
-        );
-      } catch (e) {
-        // se o navegador bloquear localStorage, a sessão simplesmente não persiste
-      }
-      setAuthBusy(false);
-    } catch (e) {
-      setAuthError("Não foi possível conectar agora. Tente novamente.");
-      setAuthBusy(false);
+    if (password.length < 6) {
+      setAuthError("A senha precisa ter pelo menos 6 caracteres.");
+      return;
     }
+    setAuthBusy(true);
+    const { data, error } = await supabase.auth.signUp({
+      email: email.trim(),
+      password,
+      options: { data: { company_name: companyName.trim() } },
+    });
+    if (error) {
+      setAuthError(translateAuthError(error));
+    } else if (data.user && !data.session) {
+      setAuthMessage("Conta criada! Verifique seu e-mail (e a caixa de spam) para confirmar antes de entrar.");
+      setAuthMode("login");
+    }
+    setAuthBusy(false);
+  }
+
+  async function handleForgotPassword() {
+    setAuthError("");
+    setAuthMessage("");
+    if (!email.trim()) {
+      setAuthError("Digite seu e-mail.");
+      return;
+    }
+    setAuthBusy(true);
+    const { error } = await supabase.auth.resetPasswordForEmail(email.trim());
+    if (error) setAuthError(translateAuthError(error));
+    else setAuthMessage("Se esse e-mail estiver cadastrado, enviamos um link de redefinição de senha.");
+    setAuthBusy(false);
+  }
+
+  function handleAuthKeyDown(e) {
+    if (e.key !== "Enter") return;
+    if (authMode === "signup") handleSignup();
+    else if (authMode === "forgot") handleForgotPassword();
+    else handleLogin();
+  }
+
+  async function logout() {
+    await supabase.auth.signOut();
+    setItems([]);
+    setHistory([]);
   }
 
   useEffect(() => {
-    if (!workspace) return;
+    if (!session) return;
     let cancelled = false;
     setLoadingData(true);
     (async () => {
       try {
-        const [itemsRes, historyRes] = await Promise.allSettled([
-          storage.get(`acurastock:data:${workspace.slug}`),
-          storage.get(`acurastock:history:${workspace.slug}`),
-        ]);
+        const data = await loadAppData(session.user.id);
         if (!cancelled) {
-          setItems(
-            itemsRes.status === "fulfilled" && itemsRes.value
-              ? JSON.parse(itemsRes.value.value)
-              : []
-          );
-          setHistory(
-            historyRes.status === "fulfilled" && historyRes.value
-              ? JSON.parse(historyRes.value.value)
-              : []
-          );
+          setItems(data.items);
+          setHistory(data.history);
         }
       } catch (e) {
         if (!cancelled) {
           setItems([]);
           setHistory([]);
+          setSaveError("Não foi possível carregar seus dados agora.");
         }
       } finally {
         if (!cancelled) setLoadingData(false);
@@ -254,32 +245,16 @@ export default function AcuraStock() {
     return () => {
       cancelled = true;
     };
-  }, [workspace]);
+  }, [session]);
 
-  async function persistItems(nextItems) {
-    const ws = workspaceRef.current;
-    if (!ws) return;
+  async function persistAll(nextItems, nextHistory) {
+    const sess = sessionRef.current;
+    if (!sess) return;
     setSaveError("");
     try {
-      const result = await storage.set(
-        `acurastock:data:${ws.slug}`,
-        JSON.stringify(nextItems)
-      );
-      if (!result) setSaveError("Não foi possível salvar. Tente novamente.");
+      await saveAppData(sess.user.id, { items: nextItems, history: nextHistory });
     } catch (e) {
       setSaveError("Não foi possível salvar. Tente novamente.");
-    }
-  }
-
-  async function persistHistory(nextHistory) {
-    if (!workspace) return;
-    try {
-      await storage.set(
-        `acurastock:history:${workspace.slug}`,
-        JSON.stringify(nextHistory)
-      );
-    } catch (e) {
-      setSaveError("Não foi possível salvar o histórico.");
     }
   }
 
@@ -301,7 +276,7 @@ export default function AcuraStock() {
       },
     ];
     setItems(next);
-    persistItems(next);
+    persistAll(next, historyRef.current);
 
     setName("");
     setBarcodeField("");
@@ -314,7 +289,7 @@ export default function AcuraStock() {
   function removeItem(id) {
     const next = items.filter((i) => i.id !== id);
     setItems(next);
-    persistItems(next);
+    persistAll(next, historyRef.current);
   }
 
   function updateItemField(id, field, rawValue) {
@@ -329,7 +304,7 @@ export default function AcuraStock() {
   }
 
   function handleFieldBlur() {
-    persistItems(itemsRef.current);
+    persistAll(itemsRef.current, historyRef.current);
   }
 
   function handleKeyDown(e) {
@@ -345,7 +320,7 @@ export default function AcuraStock() {
         i === idx ? { ...it, counted: it.counted + 1 } : it
       );
       setItems(next);
-      persistItems(next);
+      persistAll(next, historyRef.current);
       setScanFeedback({
         type: "ok",
         text: `${current[idx].name}: contado agora ${next[idx].counted}`,
@@ -358,23 +333,6 @@ export default function AcuraStock() {
       setScanNotice(`Código ${code} não cadastrado — preencha o nome do item abaixo e adicione.`);
     }
   }, []);
-
-  function handleAuthKeyDown(e) {
-    if (e.key === "Enter") handleAuth();
-  }
-
-  function logout() {
-    setWorkspace(null);
-    setItems([]);
-    setHistory([]);
-    setCompany("");
-    setCode("");
-    try {
-      localStorage.removeItem("acurastock:session");
-    } catch (e) {
-      // ignora se o navegador bloquear localStorage
-    }
-  }
 
   function triggerImport() {
     fileInputRef.current?.click();
@@ -417,7 +375,7 @@ export default function AcuraStock() {
       }
       const next = [...items, ...imported];
       setItems(next);
-      persistItems(next);
+      persistAll(next, historyRef.current);
       setSaveError("");
     };
     reader.readAsText(file, "UTF-8");
@@ -438,7 +396,7 @@ export default function AcuraStock() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `acurastock-${workspace.slug}-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `acurastock-${fileSlug}-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -464,7 +422,7 @@ export default function AcuraStock() {
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8" />
-<title>AcuraStock - Relatorio ${workspace.name}</title>
+<title>AcuraStock - Relatorio ${companyName}</title>
 <style>
   body { font-family: Arial, Helvetica, sans-serif; color: #1a1a1a; margin: 40px; }
   h1 { margin-bottom: 0; }
@@ -483,7 +441,7 @@ export default function AcuraStock() {
 </head>
 <body>
   <h1>AcuraStock</h1>
-  <p class="sub">Workspace: <strong>${workspace.name}</strong> &middot; Relatório gerado em ${dateStr}</p>
+  <p class="sub">Empresa: <strong>${companyName}</strong> &middot; Relatório gerado em ${dateStr}</p>
 
   <div class="summary">
     <div>
@@ -519,7 +477,7 @@ export default function AcuraStock() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `acurastock-relatorio-${workspace.slug}-${new Date().toISOString().slice(0, 10)}.html`;
+    a.download = `acurastock-relatorio-${fileSlug}-${new Date().toISOString().slice(0, 10)}.html`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -529,7 +487,7 @@ export default function AcuraStock() {
       app: "acurastock",
       version: 1,
       exportedAt: new Date().toISOString(),
-      workspace: { slug: workspace.slug, name: workspace.name },
+      workspace: { name: companyName },
       items,
       history,
     };
@@ -537,7 +495,7 @@ export default function AcuraStock() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `acurastock-backup-${workspace.slug}-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `acurastock-backup-${fileSlug}-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -558,7 +516,7 @@ export default function AcuraStock() {
           return;
         }
         const confirmed = window.confirm(
-          `Isso vai SUBSTITUIR todos os itens e o histórico atuais deste workspace pelos dados do backup (de ${
+          `Isso vai SUBSTITUIR todos os itens e o histórico atuais desta conta pelos dados do backup (de ${
             data.exportedAt ? new Date(data.exportedAt).toLocaleString("pt-BR") : "data desconhecida"
           }). Essa ação não pode ser desfeita. Continuar?`
         );
@@ -568,8 +526,7 @@ export default function AcuraStock() {
         const restoredHistory = Array.isArray(data.history) ? data.history : [];
         setItems(restoredItems);
         setHistory(restoredHistory);
-        persistItems(restoredItems);
-        persistHistory(restoredHistory);
+        persistAll(restoredItems, restoredHistory);
         setSaveError("");
       } catch (err) {
         setSaveError("Não foi possível ler esse arquivo de backup (JSON inválido).");
@@ -589,7 +546,7 @@ export default function AcuraStock() {
     };
     const next = [...history, snapshot];
     setHistory(next);
-    persistHistory(next);
+    persistAll(itemsRef.current, next);
   }
 
   const rowsUnsorted = useMemo(() => {
@@ -665,7 +622,22 @@ export default function AcuraStock() {
     `}</style>
   );
 
-  if (!workspace) {
+  if (sessionLoading) {
+    return (
+      <div className="w-full min-h-screen flex items-center justify-center" style={{ background: TOKENS.bg }}>
+        <p className="text-sm" style={{ color: TOKENS.textSecondary }}>Carregando...</p>
+      </div>
+    );
+  }
+
+  if (!session) {
+    const title =
+      authMode === "signup" ? "Crie sua conta" : authMode === "forgot" ? "Recuperar senha" : "Entre na sua conta";
+    const submitHandler =
+      authMode === "signup" ? handleSignup : authMode === "forgot" ? handleForgotPassword : handleLogin;
+    const submitLabel =
+      authMode === "signup" ? "Criar conta" : authMode === "forgot" ? "Enviar link de redefinição" : "Entrar";
+
     return (
       <div className="w-full min-h-screen flex items-center justify-center px-4" style={{ background: TOKENS.bg, ...fontStyle }}>
         {fontLoader}
@@ -675,57 +647,117 @@ export default function AcuraStock() {
             <h1 className="mono text-xl font-bold mt-4" style={{ color: TOKENS.textPrimary }}>
               Acura<span style={{ color: TOKENS.amber }}>Stock</span>
             </h1>
-            <p className="text-xs mt-1 text-center" style={{ color: TOKENS.textSecondary }}>
-              Entre com o workspace da sua empresa
-            </p>
+            <p className="text-xs mt-1 text-center" style={{ color: TOKENS.textSecondary }}>{title}</p>
           </div>
 
           <div className="rounded-lg p-5" style={{ background: TOKENS.panel, border: `1px solid ${TOKENS.panelBorder}` }}>
+            {authMode === "signup" && (
+              <>
+                <label className="text-xs uppercase tracking-widest mb-1 flex items-center gap-1.5" style={{ color: TOKENS.textSecondary }}>
+                  <Building2 size={12} /> Nome da empresa
+                </label>
+                <input
+                  value={companyName}
+                  onChange={(e) => setCompanyName(e.target.value)}
+                  onKeyDown={handleAuthKeyDown}
+                  placeholder="Ex: Distribuidora Aurora"
+                  className="mono w-full px-3 py-2 rounded text-sm outline-none mb-4"
+                  style={inputStyle()}
+                />
+              </>
+            )}
+
             <label className="text-xs uppercase tracking-widest mb-1 flex items-center gap-1.5" style={{ color: TOKENS.textSecondary }}>
-              <Building2 size={12} /> Nome da empresa
+              E-mail
             </label>
             <input
-              value={company}
-              onChange={(e) => setCompany(e.target.value)}
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
               onKeyDown={handleAuthKeyDown}
-              placeholder="Ex: Distribuidora Aurora"
+              placeholder="voce@empresa.com"
+              type="email"
               className="mono w-full px-3 py-2 rounded text-sm outline-none mb-4"
               style={inputStyle()}
             />
-            <label className="text-xs uppercase tracking-widest mb-1 flex items-center gap-1.5" style={{ color: TOKENS.textSecondary }}>
-              <Lock size={12} /> Código de acesso
-            </label>
-            <input
-              value={code}
-              onChange={(e) => setCode(e.target.value)}
-              onKeyDown={handleAuthKeyDown}
-              placeholder="Crie ou digite o código"
-              type="password"
-              className="mono w-full px-3 py-2 rounded text-sm outline-none mb-1"
-              style={inputStyle()}
-            />
-            <p className="text-[11px] mb-4" style={{ color: TOKENS.textSecondary }}>
-              Se a empresa ainda não existe, esse código cria o workspace agora.
-            </p>
+
+            {authMode !== "forgot" && (
+              <>
+                <label className="text-xs uppercase tracking-widest mb-1 flex items-center gap-1.5" style={{ color: TOKENS.textSecondary }}>
+                  <Lock size={12} /> Senha
+                </label>
+                <input
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  onKeyDown={handleAuthKeyDown}
+                  placeholder={authMode === "signup" ? "Mínimo 6 caracteres" : "Sua senha"}
+                  type="password"
+                  className="mono w-full px-3 py-2 rounded text-sm outline-none mb-1"
+                  style={inputStyle()}
+                />
+              </>
+            )}
 
             {authError && (
-              <p className="text-xs mb-3 flex items-center gap-1.5" style={{ color: TOKENS.bad }}>
+              <p className="text-xs mt-2 mb-1 flex items-center gap-1.5" style={{ color: TOKENS.bad }}>
                 <TriangleAlert size={12} /> {authError}
+              </p>
+            )}
+            {authMessage && (
+              <p className="text-xs mt-2 mb-1" style={{ color: TOKENS.good }}>
+                {authMessage}
               </p>
             )}
 
             <button
-              onClick={handleAuth}
+              onClick={submitHandler}
               disabled={authBusy}
-              className="w-full py-2 rounded text-sm font-medium transition-opacity hover:opacity-90 disabled:opacity-50"
+              className="w-full py-2 rounded text-sm font-medium transition-opacity hover:opacity-90 disabled:opacity-50 mt-3"
               style={{ background: TOKENS.amber, color: "#1A1400" }}
             >
-              {authBusy ? "Entrando..." : "Entrar no workspace"}
+              {authBusy ? "Aguarde..." : submitLabel}
             </button>
+
+            <div className="flex justify-between mt-4 text-xs">
+              {authMode === "login" ? (
+                <>
+                  <button
+                    onClick={() => {
+                      setAuthMode("signup");
+                      setAuthError("");
+                      setAuthMessage("");
+                    }}
+                    style={{ color: TOKENS.textSecondary }}
+                  >
+                    Criar conta
+                  </button>
+                  <button
+                    onClick={() => {
+                      setAuthMode("forgot");
+                      setAuthError("");
+                      setAuthMessage("");
+                    }}
+                    style={{ color: TOKENS.textSecondary }}
+                  >
+                    Esqueci minha senha
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={() => {
+                    setAuthMode("login");
+                    setAuthError("");
+                    setAuthMessage("");
+                  }}
+                  style={{ color: TOKENS.textSecondary }}
+                >
+                  ← Voltar para login
+                </button>
+              )}
+            </div>
           </div>
 
           <p className="text-[11px] mt-4 text-center leading-relaxed" style={{ color: TOKENS.textSecondary }}>
-            O código de acesso é verificado por hash (nunca fica salvo em texto puro), mas essa verificação ainda acontece só no navegador — não é o mesmo nível de segurança de um sistema com backend próprio. Evite reutilizar senhas importantes aqui.
+            Login com autenticação real (Supabase) — sua senha nunca fica salva em texto puro, e seus dados ficam isolados dos de outras empresas no próprio banco de dados.
           </p>
         </div>
       </div>
@@ -745,7 +777,7 @@ export default function AcuraStock() {
                 Acura<span style={{ color: TOKENS.amber }}>Stock</span>
               </h1>
               <p className="text-xs print-text" style={{ color: TOKENS.textSecondary }}>
-                Workspace: <span className="mono">{workspace.name}</span> · Relatório de {new Date().toLocaleDateString("pt-BR")}
+                Empresa: <span className="mono">{companyName}</span> · Relatório de {new Date().toLocaleDateString("pt-BR")}
               </p>
             </div>
           </div>
@@ -953,7 +985,7 @@ export default function AcuraStock() {
 
         {loadingData ? (
           <div className="rounded-lg p-10 text-center mt-4" style={{ background: TOKENS.panel, border: `1px solid ${TOKENS.panelBorder}` }}>
-            <p className="text-sm" style={{ color: TOKENS.textSecondary }}>Carregando dados do workspace...</p>
+            <p className="text-sm" style={{ color: TOKENS.textSecondary }}>Carregando seus dados...</p>
           </div>
         ) : rows.length === 0 ? (
           <div className="rounded-lg p-10 text-center mt-4" style={{ background: TOKENS.panel, border: `1px dashed ${TOKENS.panelBorder}` }}>
